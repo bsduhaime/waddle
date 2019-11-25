@@ -1,6 +1,6 @@
 '''
 Valve Goldsrc WAD3 Reader/Writer
-Version 0.1
+Version 0.2
 Written by Brian Duhaime
 Date created: 11/23/19
 Date updated: 11/23/19
@@ -12,18 +12,23 @@ http://hlbsp.sourceforge.net/index.php?content=waddef
 from PIL import Image
 import ctypes
 import struct
+import sys
 
 
 class WADHeader():
-    def __init__(self, szMagic, nDir, nDirOffset):
+    def __init__(self, szMagic, nDir, nDirOffset, fSize=-1):
         self.szMagic = szMagic
         self.nDir = ctypes.c_uint32(nDir)
         self.nDirOffset = ctypes.c_uint32(nDirOffset)
+        self.fileSize = fSize   # Number of bytes
 
     def __str__(self):
         result = "Type: " + self.szMagic + ", "
+        if self.fileSize >= 0:
+            result += "File Size (bytes): " + str(self.fileSize) + ", "
         result += "Number of Entries: " + str(self.nDir.value) + ", "
         result += "Directory Location: " + str(self.nDirOffset.value)
+        return result
 
     # Getters so we don't have to figure out what's a ctype or not
     def getszMagic(self):
@@ -63,7 +68,7 @@ class WADTexture():
         self.size = (w.value, h.value)
         self.offsets = [ctypes.c_uint8(i) for i in offsets]
         self.colors = None
-        self.image = None
+        self.images = [None] * 4
 
     def __str__(self):
         result = self.name + ", "
@@ -81,7 +86,8 @@ class WADFile():
             self.readFile(wadLoc)
         else:
             self.header = None
-            self.directory = None
+            self.directory = []
+            self.content = []
 
     def readFile(self, wadLoc):
         wadContent = []
@@ -90,7 +96,7 @@ class WADFile():
             # Read in the header data
         hData = struct.unpack("@4sII", wadContent[:12])
         tName = hData[0].decode("utf-8")
-        self.header = WADHeader(tName, hData[1], hData[2])
+        self.header = WADHeader(tName, hData[1], hData[2], len(wadContent))
 
         # Read in the directory entries
         self.directory = []
@@ -104,7 +110,6 @@ class WADFile():
             tName = dirEntry[-1].decode("utf-8")
             tName = (tName[:-1] + "\0").upper()   # All texture names are null terminated
             self.directory.append(WADDirEntry(dirEntry[0], dirEntry[1], dirEntry[2], dirEntry[3], dirEntry[4], tName))
-            # self.reference[tName] = [self.directory[-1]]
 
         # Read in image header & data, and create objects
         self.content = []
@@ -121,10 +126,8 @@ class WADFile():
             # TODO: Handle compressed images?
 
             # Read in actual image data and create an appropriate Pillow Image object
-            # Pixel data
-            pixelPtr = mips[0] + headerLoc
+            # Pixel data length
             pixelLen = header[1] * header[2]
-            pixelArray = wadContent[pixelPtr:pixelPtr + pixelLen]
             # Palette Data
             # Sum total offsets of each mip from each other
             totalOffset = sum(mips)
@@ -132,17 +135,82 @@ class WADFile():
             colPtr = headerLoc + totalOffset + int(pixelLen * 1.328125) + 2
             colPalette = list(struct.unpack("@"+str(COL_SIZE)+"B", wadContent[colPtr:colPtr+COL_SIZE]))
             self.content[-1].colors = colPalette
-            # Image object creation and palette assignment
-            self.content[-1].image = Image.frombytes("P", (header[1], header[2]), pixelArray, "raw")
-            self.content[-1].image.putpalette(colPalette)
+            # Image object creation and palette assignment for each mip level
+            w, h = header[1], header[2]
+            pixelPtr = headerLoc
+            for i in range(len(mips)):
+                pixelPtr += mips[i]
+                pixelLen = int(w * h)
+                pixelArray = wadContent[pixelPtr:pixelPtr + pixelLen]
+                self.content[-1].images[i] = Image.frombytes("P", (int(w), int(h)), pixelArray, "raw")
+                self.content[-1].images[i].putpalette(colPalette)
+                w /= 2
+                h /= 2
+                pixelPtr += pixelLen
 
-            # self.reference[tName].append(self.content[-1])
+            self.reference[tName] = (entry, self.content[-1])
 
+    def writeFile(self, outLoc):
+        # TODO: the output file length may change during editing. Account for this!
+        out = [0] * ((self.header.getnDir() * 32) + self.header.getnDirOffset())
+        # Pack and write the header, record its location
+        hLump = struct.pack("@4sII", bytes(self.header.getszMagic(), "utf-8"), self.header.getnDir(), self.header.getnDirOffset())
+        h_hLump = 0
+        # Pack and write the directory, record its location
+        dLump = bytearray()
+        h_dLump = self.header.getnDirOffset()
+        hs_tLump = []   # List of headers for each texture
+        for entry in self.directory:
+            eData = struct.pack("@IIIB?H16s", entry.nFilePos.value, entry.nDiskSize.value, entry.nSize.value, entry.nType.value, int(entry.compression), 0, bytes(entry.name, "utf-8"))
+            dLump.extend(eData)
+            hs_tLump.append(entry.nFilePos.value)
+        # Pack and write each texture
+        tLumps = []
+        for tex in self.content:
+            tData = struct.pack("@16sII4B", bytes(tex.name, "utf-8"), tex.size[0], tex.size[1], tex.offsets[0].value, tex.offsets[1].value, tex.offsets[2].value, tex.offsets[3].value)
+            tData = bytearray(tData)
+            for i in range(len(tex.offsets)):
+                # Since we're dealing with an offset from the previous mip
+                # except in the case of the first mip.
+                mip = 0
+                if i == 0:
+                    mip = tex.offsets[i].value - len(tData)
+                else:
+                    mip = tex.offsets[i].value
+                mipX = bytearray(b'\x00') * mip
+                mipX.extend(tex.images[i].tobytes())
+                tData.extend(mipX)
+            tData.extend(b'\x00\x00')   # Two dummy bytes before the color palette
+            tData.extend(bytearray(tex.colors))
+            tLumps.append(tData)
+        # Push bytes out to the file
+        for i in range(h_hLump, h_hLump + len(hLump)):
+            out[i] = hLump[i-h_hLump]
+        for j in range(h_dLump, h_dLump + len(dLump)):
+            out[j] = dLump[j-h_dLump]
+        for k in range(len(tLumps)):
+            tPtr = hs_tLump[k]
+            tData = tLumps[k]
+            for b in range(tPtr, tPtr + len(tData)):
+                out[b] = tData[b-tPtr]
+        with open(outLoc, "wb") as outFile:
+            outFile.write(bytearray(out))
 
-wadTest = WADFile("halflife.wad")
-print(wadTest.header.getszMagic())
+    def recalculateHeaderInfo(self):
+        # Call this when saving and/or changing texture data
+        # Count all directory entries and update header info
+        # Determine directory offset based off new texture info
+        pass
+
 
 # Medkit - 55
-i = 128
+i = int(sys.argv[2])
+wadTest = WADFile(sys.argv[1])
+print("Original: ")
+print(wadTest.header)
+wadTest.writeFile("testwad.wad")
+wadTest = WADFile("testwad.wad")
+print("Rewrite: ")
+print(wadTest.header)
 print(wadTest.content[i])
-wadTest.content[i].image.show()
+wadTest.content[i].images[int(sys.argv[3])].show()
