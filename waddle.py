@@ -1,21 +1,25 @@
 '''
 Valve Goldsrc WAD3 Reader/Writer
-Version 0.2
+Version 0.2.2
 Written by Brian Duhaime
 Date created: 11/23/19
-Date updated: 11/23/19
+Date updated: 11/24/19
 
-Kudos for the information on WAD files from this site:
+Kudos for the information on WAD files from these sites:
 http://hlbsp.sourceforge.net/index.php?content=waddef
+http://www.j0e.io/tutorials/wad3-format/
 '''
 
-from PIL import Image
+from PIL import Image, ImageTk
 import ctypes
 import struct
 import sys
+import tkinter as tk
 
 
 class WADHeader():
+    SIZE = 12
+
     def __init__(self, szMagic, nDir, nDirOffset, fSize=-1):
         self.szMagic = szMagic
         self.nDir = ctypes.c_uint32(nDir)
@@ -42,6 +46,8 @@ class WADHeader():
 
 
 class WADDirEntry():
+    SIZE = 32  # bytes
+
     def __init__(self, nFilePos, nDiskSize, nSize, nType, comp, name):
         self.nFilePos = ctypes.c_uint32(nFilePos)
         self.nDiskSize = ctypes.c_uint32(nDiskSize)
@@ -61,6 +67,9 @@ class WADDirEntry():
 
 
 class WADTexture():
+    H_SIZE = 28        # Header size in bytes
+    COL_SIZE = 768     # palette size in bytes
+
     def __init__(self, name, width, height, offsets):
         self.name = name
         w = ctypes.c_uint32(width)
@@ -71,10 +80,20 @@ class WADTexture():
         self.images = [None] * 4
 
     def __str__(self):
-        result = self.name + ", "
+        formattedName = self.name
+        # Remove non-printable characters
+        formattedName = ''.join([c for c in formattedName if ord(c) > 31 or ord(c) == 9])
+        result = formattedName + ", "
         result += "Dimensions: " + str(self.size) + ", "
         offsetTemp = [i.value for i in self.offsets]
         result += "Mipmap Offsets: " + str(offsetTemp)
+        return result
+
+    def getSize(self):
+        # Mip offset size + color table + padding
+        result = sum([i.value for i in self.offsets]) + 768 + 4
+        for img in self.images:
+            result += len(bytearray(img.tobytes()))
         return result
 
 
@@ -96,12 +115,15 @@ class WADFile():
             # Read in the header data
         hData = struct.unpack("@4sII", wadContent[:12])
         tName = hData[0].decode("utf-8")
+        if tName != "WAD2" and tName != "WAD3":
+            print("Given file is not in WAD2/WAD3 Format! Given:", tName)
+            raise SystemExit
         self.header = WADHeader(tName, hData[1], hData[2], len(wadContent))
 
         # Read in the directory entries
         self.directory = []
         # 3*4b + 2*1b + 1*2b + 16*1b = 32b
-        DIR_ENTRY_SIZE = 32   # bytes
+        DIR_ENTRY_SIZE = WADDirEntry.SIZE   # bytes
         start = self.header.getnDirOffset()
         end = start + (self.header.getnDir() * DIR_ENTRY_SIZE)
         for byte in range(start, end, DIR_ENTRY_SIZE):
@@ -113,8 +135,8 @@ class WADFile():
 
         # Read in image header & data, and create objects
         self.content = []
-        H_SIZE = 16 + 8 + 4
-        COL_SIZE = 256 * 3  # 256 elements with 3 RGB bytes each
+        H_SIZE = WADTexture.H_SIZE
+        COL_SIZE = WADTexture.COL_SIZE  # 256 elements with 3 RGB bytes each
         for entry in self.directory:
             # Create the header info for the object
             headerLoc = entry.nFilePos.value
@@ -151,7 +173,7 @@ class WADFile():
             self.reference[tName] = (entry, self.content[-1])
 
     def writeFile(self, outLoc):
-        # TODO: the output file length may change during editing. Account for this!
+        self.recalculateOffsets()    # Reformat offset info for final file
         out = [0] * ((self.header.getnDir() * 32) + self.header.getnDirOffset())
         # Pack and write the header, record its location
         hLump = struct.pack("@4sII", bytes(self.header.getszMagic(), "utf-8"), self.header.getnDir(), self.header.getnDirOffset())
@@ -196,21 +218,60 @@ class WADFile():
         with open(outLoc, "wb") as outFile:
             outFile.write(bytearray(out))
 
-    def recalculateHeaderInfo(self):
+    def recalculateOffsets(self):
         # Call this when saving and/or changing texture data
         # Count all directory entries and update header info
+        self.header.nDir = ctypes.c_uint32(len(self.directory))
         # Determine directory offset based off new texture info
-        pass
+        # TODO: change directory entry start positions here too
+        offset = WADHeader.SIZE   # Start for header
+        for tex in self.content:
+            offset += tex.getSize()
+        self.header.nDirOffset = ctypes.c_uint32(offset)
 
 
-# Medkit - 55
-i = int(sys.argv[2])
 wadTest = WADFile(sys.argv[1])
-print("Original: ")
-print(wadTest.header)
-wadTest.writeFile("testwad.wad")
-wadTest = WADFile("testwad.wad")
-print("Rewrite: ")
-print(wadTest.header)
-print(wadTest.content[i])
-wadTest.content[i].images[int(sys.argv[3])].show()
+
+# Initialization of Tkinter and all our variables.
+W_WIDTH, W_HEIGHT = (1024, 768)
+root = tk.Tk()
+root.title(wadTest.header)
+canvas = tk.Canvas(root, width=W_WIDTH, height=W_HEIGHT)
+canvas.pack()
+index = tk.IntVar(value=0)
+currTex = wadTest.content[index.get()]
+currTexLbl = tk.StringVar()
+currTexLbl.set("Texture "+str(index.get())+"\n"+str(currTex))
+mip0Tex = ImageTk.PhotoImage(currTex.images[0])
+
+
+def updateTexture(i):
+    global currTex, mip0, mip0Tex, currTexLbl
+    if i < 0:
+        index.set(len(wadTest.content)-1)
+    elif i >= len(wadTest.content):
+        index.set(0)
+    else:
+        index.set(i)
+    currTex = wadTest.content[index.get()]
+    mip0Tex = ImageTk.PhotoImage(currTex.images[0])
+    mip0.configure(image=mip0Tex)
+    currTexLbl.set("Texture "+str(index.get())+"\n"+str(currTex))
+
+
+# Holds the image display
+imgFrame = tk.Frame(root)                   # Holds the current image
+imgFrame.place(relx=0.05, rely=0.05, relwidth=0.9, relheight=0.7)
+mip0 = tk.Label(imgFrame, image=mip0Tex)
+mip0.place(anchor='n', relx=0.5, rely=0.5)
+
+# Holds the prev/next buttons, and image label
+btnFrame = tk.Frame(root)                   # For all buttons/labels
+btnFrame.place(relx=0.05, rely=0.75, relwidth=0.9, relheight=0.15)
+imgInfo = tk.Label(btnFrame, textvariable=currTexLbl)  # Holds curr image name
+imgInfo.place(anchor="n", relx=0.5, rely=0.2)
+btnNext = tk.Button(btnFrame, text="Next", command=lambda: updateTexture(index.get()+1))      # Holds next button
+btnNext.place(relx=0.8, rely=0.15, relwidth=0.15, relheight=0.7)
+btnPrev = tk.Button(btnFrame, text="Previous", command=lambda: updateTexture(index.get()-1))  # Holds previous button
+btnPrev.place(relx=0.05, rely=0.15, relwidth=0.15, relheight=0.7)
+root.mainloop()
