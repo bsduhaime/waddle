@@ -3,7 +3,7 @@ Valve Goldsrc WAD3 Reader/Writer
 Version 0.2.2
 Written by Brian Duhaime
 Date created: 11/23/19
-Date updated: 11/24/19
+Date updated: 11/25/19
 
 Kudos for the information on WAD files from these sites:
 http://hlbsp.sourceforge.net/index.php?content=waddef
@@ -15,6 +15,7 @@ import ctypes
 import struct
 import sys
 import tkinter as tk
+from tkinter import filedialog
 
 
 class WADHeader():
@@ -80,10 +81,8 @@ class WADTexture():
         self.images = [None] * 4
 
     def __str__(self):
-        formattedName = self.name
         # Remove non-printable characters
-        formattedName = ''.join([c for c in formattedName if ord(c) > 31 or ord(c) == 9])
-        result = formattedName + ", "
+        result = self.getName() + ", "
         result += "Dimensions: " + str(self.size) + ", "
         offsetTemp = [i.value for i in self.offsets]
         result += "Mipmap Offsets: " + str(offsetTemp)
@@ -95,6 +94,9 @@ class WADTexture():
         for img in self.images:
             result += len(bytearray(img.tobytes()))
         return result
+
+    def getName(self):
+        return ''.join([c for c in self.name if ord(c) > 31 or ord(c) == 9])
 
 
 class WADFile():
@@ -109,6 +111,9 @@ class WADFile():
             self.content = []
 
     def readFile(self, wadLoc):
+        self.header = None
+        self.directory = []
+        self.content = []
         wadContent = []
         with open(wadLoc, mode="rb") as wadFile:
             wadContent = wadFile.read()
@@ -230,48 +235,92 @@ class WADFile():
         self.header.nDirOffset = ctypes.c_uint32(offset)
 
 
-wadTest = WADFile(sys.argv[1])
+# WAD File object for program
+wadFile = WADFile()
+try:
+    print("Starting with", sys.argv[1], "open.")
+    wadFile = WADFile(sys.argv[1])
+except IndexError:
+    print("Starting without a file open.")
 
 # Initialization of Tkinter and all our variables.
+# TODO: Handle opening Waddle without a file.
 W_WIDTH, W_HEIGHT = (1024, 768)
 root = tk.Tk()
-root.title(wadTest.header)
+root.title("Waddle - " + str(wadFile.header))
 canvas = tk.Canvas(root, width=W_WIDTH, height=W_HEIGHT)
 canvas.pack()
 index = tk.IntVar(value=0)
-currTex = wadTest.content[index.get()]
+currTex = wadFile.content[index.get()]
 currTexLbl = tk.StringVar()
 currTexLbl.set("Texture "+str(index.get())+"\n"+str(currTex))
 mip0Tex = ImageTk.PhotoImage(currTex.images[0])
 
 
+# Callback functions for all GUI features
 def updateTexture(i):
     global currTex, mip0, mip0Tex, currTexLbl
     if i < 0:
-        index.set(len(wadTest.content)-1)
-    elif i >= len(wadTest.content):
+        index.set(len(wadFile.content)-1)
+    elif i >= len(wadFile.content):
         index.set(0)
     else:
         index.set(i)
-    currTex = wadTest.content[index.get()]
+    currTex = wadFile.content[index.get()]
     mip0Tex = ImageTk.PhotoImage(currTex.images[0])
     mip0.configure(image=mip0Tex)
     currTexLbl.set("Texture "+str(index.get())+"\n"+str(currTex))
 
 
+def onListboxSelect(event):
+    index = int(event.widget.curselection()[0])
+    updateTexture(index)
+
+
+def openFile():
+    path = filedialog.askopenfilename(title="Select a WAD File", filetypes=(("WAD Files", "*.wad"),("All Files","*.*")))
+    wadFile.readFile(path)
+    imgList.delete(0, tk.END)
+    imgList.insert(tk.END, *[tex.getName() for tex in wadFile.content])
+    root.title("Waddle - " + str(wadFile.header))
+    updateTexture(0)
+
+
+# Holds menubar variables
+menubar = tk.Menu(root)
+filemenu = tk.Menu(menubar, tearoff=0)
+filemenu.add_command(label="New")
+filemenu.add_command(label="Open", command=openFile)
+filemenu.add_command(label="Save")
+filemenu.add_separator()
+filemenu.add_command(label="Exit", command=root.quit)
+menubar.add_cascade(label="File", menu=filemenu)
+
+imagemenu = tk.Menu(menubar, tearoff=0)
+imagemenu.add_command(label="Replace Current")
+imagemenu.add_command(label="Add Image")
+imagemenu.add_command(label="Delete Image")
+menubar.add_cascade(label="Image", menu=imagemenu)
+
+# Holds a listbox of all the textures
+listFrame = tk.Frame(root)
+listFrame.place(relx=0.05, rely=0.05, relwidth=0.2, relheight=0.85)
+imgList = tk.Listbox(listFrame)
+imgList.insert(tk.END, *[tex.getName() for tex in wadFile.content])
+imgList.bind("<<ListboxSelect>>", onListboxSelect)
+imgList.place(relx=0, rely=0, relwidth=0.9, relheight=1)
+
 # Holds the image display
 imgFrame = tk.Frame(root)                   # Holds the current image
-imgFrame.place(relx=0.05, rely=0.05, relwidth=0.9, relheight=0.7)
+imgFrame.place(relx=0.25, rely=0.05, relwidth=0.7, relheight=0.7)
 mip0 = tk.Label(imgFrame, image=mip0Tex)
 mip0.place(anchor='n', relx=0.5, rely=0.5)
 
 # Holds the prev/next buttons, and image label
 btnFrame = tk.Frame(root)                   # For all buttons/labels
-btnFrame.place(relx=0.05, rely=0.75, relwidth=0.9, relheight=0.15)
+btnFrame.place(relx=0.25, rely=0.75, relwidth=0.7, relheight=0.15)
 imgInfo = tk.Label(btnFrame, textvariable=currTexLbl)  # Holds curr image name
 imgInfo.place(anchor="n", relx=0.5, rely=0.2)
-btnNext = tk.Button(btnFrame, text="Next", command=lambda: updateTexture(index.get()+1))      # Holds next button
-btnNext.place(relx=0.8, rely=0.15, relwidth=0.15, relheight=0.7)
-btnPrev = tk.Button(btnFrame, text="Previous", command=lambda: updateTexture(index.get()-1))  # Holds previous button
-btnPrev.place(relx=0.05, rely=0.15, relwidth=0.15, relheight=0.7)
+
+root.config(menu=menubar)
 root.mainloop()
